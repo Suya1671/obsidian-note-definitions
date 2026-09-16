@@ -28,6 +28,7 @@ export interface DefFileParseConfig {
 	defaultFileType: DefFileType;
 	divider: DividerSettings;
 	autoPlurals: boolean;
+	enableCaseSensitive: boolean;
 }
 
 export interface DefinitionPopoverConfig {
@@ -46,6 +47,8 @@ export interface Settings {
 	enableOnLinks: boolean;
 	enableSpellcheck: boolean;
 	defFolder: string;
+	enableTagDefFileDiscovery: boolean;
+	defFileTag: string;
 	popoverEvent: PopoverEventSettings;
 	defFileParseConfig: DefFileParseConfig;
 	defPopoverConfig: DefinitionPopoverConfig;
@@ -59,6 +62,8 @@ export const DEFAULT_SETTINGS: Partial<Settings> = {
 	enableInReadingView: true,
 	enableOnLinks: true,
 	enableSpellcheck: true,
+	enableTagDefFileDiscovery: false,
+	defFileTag: "def",
 	popoverEvent: PopoverEventSettings.Hover,
 	defFileParseConfig: {
 		defaultFileType: DefFileType.Consolidated,
@@ -67,6 +72,7 @@ export const DEFAULT_SETTINGS: Partial<Settings> = {
 			underscore: false,
 		},
 		autoPlurals: false,
+		enableCaseSensitive: false,
 	},
 	defPopoverConfig: {
 		displayAliases: true,
@@ -137,6 +143,19 @@ export class SettingsTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
+			.setName("Enable Case Sensitivity")
+			.setDesc("Only match if the cases of both terms match")
+			.addToggle((component) => {
+				component.setValue(
+					this.settings.defFileParseConfig.enableCaseSensitive,
+				);
+				component.onChange(async (val) => {
+					this.settings.defFileParseConfig.enableCaseSensitive = val;
+					await this.saveCallback();
+				});
+			});
+
+		new Setting(containerEl)
 			.setName("Definitions folder")
 			.setDesc(
 				"Files within this folder will be parsed to register definitions",
@@ -153,6 +172,36 @@ export class SettingsTab extends PluginSettingTab {
 					},
 				);
 			});
+
+		new Setting(containerEl)
+			.setName("Enable global definition file discovery")
+			.setDesc(
+				"Treat any markdown file carrying the configured tag in its frontmatter as a definition file, regardless of its folder. Turn this off if you experience any performance degradation, especially if you have a large vault.",
+			)
+			.addToggle((component) => {
+				component.setValue(this.settings.enableTagDefFileDiscovery);
+				component.onChange(async (val) => {
+					this.settings.enableTagDefFileDiscovery = val;
+					await this.saveCallback();
+					this.display();
+				});
+			});
+
+		if (this.settings.enableTagDefFileDiscovery) {
+			new Setting(containerEl)
+				.setName("Definition file tag")
+				.setDesc(
+					'Files with this tag (add under the "tags" frontmatter) will be treated as a definition file',
+				)
+				.addText((component) => {
+					component.setValue(this.settings.defFileTag);
+					component.setPlaceholder("definition");
+					component.onChange(async (val) => {
+						this.settings.defFileTag = val;
+						await this.saveCallback();
+					});
+				});
+		}
 
 		new Setting(containerEl)
 			.setName("Definition file format settings")

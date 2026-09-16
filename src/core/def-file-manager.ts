@@ -1,12 +1,14 @@
-import { App, TFile, TFolder } from "obsidian";
+import { App, Notice, parseFrontMatterTags, TFile, TFolder } from "obsidian";
 import { PTreeNode } from "src/editor/prefix-tree";
 import { DEFAULT_DEF_FOLDER, VALID_DEFINITION_FILE_TYPES } from "src/settings";
 import { normaliseWord } from "src/util/editor";
-import { logDebug, logWarn } from "src/util/log";
+import { logDebug, logError, logWarn } from "src/util/log";
 import { useRetry } from "src/util/retry";
 import { FileParser } from "./file-parser";
 import { DefFileType } from "./file-type";
-import { Definition } from "./model";
+import { Definition, DuplicateDefinition } from "./model";
+import { findDuplicateDefinitions } from "./duplicate-def-detector";
+import { getSettings } from "src/settings";
 
 let defFileManager: DefManager;
 
@@ -30,6 +32,9 @@ export class DefManager {
 
 	localDefs: DefinitionRepo;
 
+	// Populated on every full load/refresh (loadDefinitions)
+	duplicateDefs: DuplicateDefinition[];
+
 	constructor(app: App) {
 		this.app = app;
 		this.globalDefs = new DefinitionRepo();
@@ -38,14 +43,15 @@ export class DefManager {
 		this.globalPrefixTree = new PTreeNode();
 		this.consolidatedDefFiles = new Map<string, TFile>();
 		this.localDefs = new DefinitionRepo();
+		this.duplicateDefs = [];
 
 		this.resetLocalConfigs();
 		this.lastUpdate = 0;
 		this.markedDirty = [];
 
-		activeWindow.NoteDefinition.definitions.global = this.globalDefs;
+		window.NoteDefinition.definitions.global = this.globalDefs;
 
-		this.loadDefinitions();
+		this.loadDefinitions().then(this.triggerDuplicateDefWarning.bind(this));
 	}
 
 	addDefFile(file: TFile) {
@@ -174,16 +180,44 @@ export class DefManager {
 	}
 
 	isDefFile(file: TFile): boolean {
+		if (
+			!VALID_DEFINITION_FILE_TYPES.some((ext) => file.path.endsWith(ext))
+		) {
+			return false;
+		}
+		if (file.path.startsWith(this.getGlobalDefFolder())) {
+			return true;
+		}
 		return (
-			file.path.startsWith(this.getGlobalDefFolder()) &&
-			VALID_DEFINITION_FILE_TYPES.some((ext) => file.path.endsWith(ext))
+			getSettings().enableTagDefFileDiscovery && this.hasDefFileTag(file)
 		);
+	}
+
+	private hasDefFileTag(file: TFile): boolean {
+		const settings = getSettings();
+		if (!settings.defFileTag) {
+			return false;
+		}
+		const cache = this.app.metadataCache.getFileCache(file);
+		if (!cache) {
+			return false;
+		}
+		const tags = parseFrontMatterTags(cache.frontmatter) ?? [];
+		return tags.includes(`#${settings.defFileTag}`);
 	}
 
 	reset() {
 		this.globalPrefixTree = new PTreeNode();
 		this.globalDefs.clear();
 		this.globalDefFiles = new Map<string, TFile>();
+		this.duplicateDefs = [];
+	}
+
+	// Duplicate/conflicting definition keys detected during the last full
+	// load/refresh. Empty if no conflicts (or if definitions have not yet
+	// been loaded).
+	getDuplicateDefinitions(): DuplicateDefinition[] {
+		return this.duplicateDefs;
 	}
 
 	// Load all definitions from registered def folder
@@ -191,7 +225,17 @@ export class DefManager {
 	// Expensive operation so use sparingly
 	loadDefinitions() {
 		this.reset();
-		this.loadGlobals().then(this.updateActiveFile.bind(this));
+		return this.loadGlobals().then(this.updateActiveFile.bind(this));
+	}
+
+	triggerDuplicateDefWarning() {
+		const duplicates = this.getDuplicateDefinitions();
+		if (duplicates.length > 0) {
+			new Notice(
+				`Note Definitions: [WARNING] ${duplicates.length} duplicate definition${duplicates.length === 1 ? "" : "s"} found. Your definitions may not work properly.\n\nRun 'List duplicate definitions' to review and resolve the duplicated definitions.`,
+				8000,
+			);
+		}
 	}
 
 	private getDefRepo() {
@@ -230,8 +274,12 @@ export class DefManager {
 					`File ${file.path} was updated, reloading definitions...`,
 				);
 				dirtyFiles.push(file.path);
-				const defs = await this.parseFile(file);
-				definitions.push(...defs);
+				try {
+					const defs = await this.parseFile(file);
+					definitions.push(...defs);
+				} catch (e) {
+					this.reportParseError(file, e);
+				}
 			}
 		}
 
@@ -270,21 +318,52 @@ export class DefManager {
 			}
 		});
 
-		if (!globalFolder) {
+		const definitions: Definition[] = [];
+
+		if (globalFolder) {
+			// Recursively load files within the global definition folder
+			definitions.push(...(await this.parseFolder(globalFolder)));
+		} else {
 			logWarn(
 				"Global definition folder not found, unable to load global definitions",
 			);
-			return;
 		}
 
-		// Recursively load files within the global definition folder
-		const definitions = await this.parseFolder(globalFolder);
+		if (getSettings().enableTagDefFileDiscovery) {
+			definitions.push(...(await this.parseTaggedFiles()));
+		}
+
 		definitions.forEach((def) => {
 			this.globalDefs.set(def);
 		});
 
+		this.duplicateDefs = findDuplicateDefinitions(
+			definitions,
+			getSettings().defFileParseConfig.enableCaseSensitive,
+		);
+
 		this.buildPrefixTree();
 		this.lastUpdate = Date.now();
+	}
+
+	// Scan the entire vault for markdown files carrying the def file tag
+	private async parseTaggedFiles(): Promise<Definition[]> {
+		const definitions: Definition[] = [];
+		const files = this.app.vault
+			.getMarkdownFiles()
+			.filter(
+				(f) =>
+					!this.globalDefFiles.has(f.path) && this.hasDefFileTag(f),
+			);
+		for (let f of files) {
+			try {
+				let defs = await this.parseFile(f);
+				definitions.push(...defs);
+			} catch (e) {
+				this.reportParseError(f, e);
+			}
+		}
+		return definitions;
 	}
 
 	private async buildPrefixTree() {
@@ -303,11 +382,24 @@ export class DefManager {
 				let defs = await this.parseFolder(f);
 				definitions.push(...defs);
 			} else if (f instanceof TFile && this.isDefFile(f)) {
-				let defs = await this.parseFile(f);
-				definitions.push(...defs);
+				try {
+					let defs = await this.parseFile(f);
+					definitions.push(...defs);
+				} catch (e) {
+					this.reportParseError(f, e);
+				}
 			}
 		}
 		return definitions;
+	}
+
+	private reportParseError(file: TFile, e: unknown) {
+		const msg = e instanceof Error ? e.message : String(e);
+		logError(`Failed to parse definition file '${file.path}': ${msg}`);
+		new Notice(
+			`Note Definitions: [ERROR] Failed to parse definition file '${file.path}'. Skipping this file.\n\nError: ${msg}`,
+			8000,
+		);
 	}
 
 	private async parseFile(file: TFile): Promise<Definition[]> {
@@ -318,6 +410,49 @@ export class DefManager {
 			this.consolidatedDefFiles.set(file.path, file);
 		}
 		return def;
+	}
+
+	// Walk the definition directory to find definition files and folders
+	getDefFilesAndFolders(): [TFolder[], TFile[]] {
+		const parentDefFolder = this.app.vault.getFolderByPath(
+			this.getGlobalDefFolder(),
+		);
+		if (!parentDefFolder) {
+			logWarn("Failed to get parent def folder");
+		}
+		const [folders, files] = parentDefFolder
+			? this.walkFolder(parentDefFolder)
+			: [[] as TFolder[], [] as TFile[]];
+
+		if (getSettings().enableTagDefFileDiscovery) {
+			const existing = new Set(files.map((f) => f.path));
+			this.app.vault
+				.getMarkdownFiles()
+				.filter((f) => !existing.has(f.path) && this.hasDefFileTag(f))
+				.forEach((f) => {
+					this.globalDefFiles.set(f.path, f);
+					files.push(f);
+				});
+		}
+
+		return [folders, files];
+	}
+
+	private walkFolder(folder: TFolder): [TFolder[], TFile[]] {
+		this.globalDefFolders.set(folder.path, folder);
+		const folders = [folder];
+		const files = [];
+		for (let f of folder.children) {
+			if (f instanceof TFolder) {
+				const [childFolders, childFiles] = this.walkFolder(f);
+				folders.push(...childFolders);
+				files.push(...childFiles);
+			} else if (f instanceof TFile && this.isDefFile(f)) {
+				this.globalDefFiles.set(f.path, f);
+				files.push(f);
+			}
+		}
+		return [folders, files];
 	}
 
 	getGlobalDefFolder() {
@@ -368,7 +503,12 @@ export class DefinitionRepo {
 
 		if (def.aliases.length > 0) {
 			def.aliases.forEach((alias) => {
-				if (defMap) {
+				if (
+					defMap &&
+					getSettings().defFileParseConfig.enableCaseSensitive
+				) {
+					defMap.set(alias, def);
+				} else if (defMap) {
 					defMap.set(alias.toLowerCase(), def);
 				}
 			});

@@ -33,12 +33,14 @@ export class AtomicDefParser extends BaseDefParser {
 			fileContent = fileContent.slice(fmPos.end.offset + 1);
 		}
 
+		let key = this.parseSettings.enableCaseSensitive ? this.file.basename : this.file.basename.toLowerCase();
+		
 		aliases = aliases.concat(
-			this.calculatePlurals([this.file.basename].concat(aliases)),
+			this.calculatePlurals([key].concat(aliases)),
 		);
 
 		const def = {
-			key: this.file.basename.toLowerCase(),
+			key: key,
 			word: this.file.basename,
 			aliases: aliases,
 			definition: fileContent,

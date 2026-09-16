@@ -1,9 +1,5 @@
-import { App } from "obsidian";
-import {
-	DEFAULT_DEF_FOLDER,
-	getSettings,
-	VALID_DEFINITION_FILE_TYPES,
-} from "src/settings";
+import { App, TFile } from "obsidian";
+import { getDefFileManager } from "src/core/def-file-manager";
 import { FileExplorerView } from "src/types/obsidian";
 import { logDebug } from "src/util/log";
 
@@ -50,7 +46,6 @@ export class FileExplorerDecoration {
 		}
 		const fileExpView = fileExplorer.view as FileExplorerView;
 
-		const settings = getSettings();
 		Object.keys(fileExpView.fileItems).forEach((k) => {
 			const fileItem = fileExpView.fileItems[k];
 
@@ -64,16 +59,10 @@ export class FileExplorerDecoration {
 				}
 			}
 
-			const defFolder = settings.defFolder || DEFAULT_DEF_FOLDER;
-
-			// If def folder is an invalid folder path, then do not add any tags
-			if (!fileExpView.fileItems[defFolder]) {
-				return;
-			}
-
+			const abstractFile = this.app.vault.getAbstractFileByPath(k);
 			if (
-				k.startsWith(defFolder) &&
-				VALID_DEFINITION_FILE_TYPES.some((ext) => k.endsWith(ext))
+				abstractFile instanceof TFile &&
+				getDefFileManager().isDefFile(abstractFile)
 			) {
 				this.tagFile(fileExpView, k, "DEF");
 			}

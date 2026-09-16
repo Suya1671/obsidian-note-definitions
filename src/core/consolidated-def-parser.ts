@@ -12,10 +12,16 @@ interface DefblockAST {
 	header: string;
 	aliases: string[];
 	body: string;
+	notes: string;
 	position: FilePosition;
 }
 
 const EOF = "";
+
+// When a line contains only this marker, the remaining lines of the def-block
+// (up to the delimiter) are treated as the user's personal notes rather than
+// part of the definition.
+export const NOTE_DELIMITER = "%%END%%";
 
 export class ConsolidatedDefParser extends BaseDefParser {
 	app: App;
@@ -41,6 +47,9 @@ export class ConsolidatedDefParser extends BaseDefParser {
 	}
 
 	async parseFile(fileContent?: string): Promise<Definition[]> {
+		if (fileContent === "") {
+			return [];
+		}
 		if (!fileContent) {
 			fileContent = await this.app.vault.cachedRead(this.file);
 		}
@@ -67,6 +76,21 @@ export class ConsolidatedDefParser extends BaseDefParser {
 	private parseDoc(): DocAST {
 		const blocks = [];
 		while (this.cursor < this.fileContent.length) {
+			// Ignore leading newlines (and whitespace)
+			let c;
+			do {
+				c = this.consumeChar();
+			} while (/\s/.test(c));
+
+			// If EOF encountered, just return
+			if (c === EOF) {
+				return {
+					blocks,
+				};
+			}
+			// otherwise return character to def block
+			this.spitChar();
+
 			blocks.push(this.parseDefBlock());
 		}
 		return {
@@ -78,12 +102,13 @@ export class ConsolidatedDefParser extends BaseDefParser {
 		const posStart = this.currLine;
 		let header = this.parseHeader();
 		let aliases = this.parseAliases();
-		let def = this.parseDef();
+		let { def, notes } = this.parseDef();
 		const posEnd = this.currLine - 1;
 		return {
 			header,
 			aliases,
 			body: def,
+			notes,
 			position: {
 				from: posStart,
 				to: posEnd,
@@ -92,21 +117,17 @@ export class ConsolidatedDefParser extends BaseDefParser {
 	}
 
 	private parseHeader(): string {
-		// Ignore leading newlines
-		let h;
-		do {
-			h = this.consumeChar();
-		} while (h == "\n");
+		const h = this.consumeChar();
 
 		if (h != "#") {
 			throw new Error(
-				`Parse Header for ${this.file.path}: Unexpected character '${h}', expected '#'`,
+				`Parse Header for ${this.file.path} (at line ${this.currLine}): Unexpected character '${h}', expected '#'`,
 			);
 		}
 		let s = this.consumeChar();
 		if (s != " ") {
 			throw new Error(
-				`Parse Header for ${this.file.path}: Unexpected character '${s}', expected SPACE`,
+				`Parse Header for ${this.file.path} (at line ${this.currLine}): Unexpected character '${s}', expected SPACE`,
 			);
 		}
 
@@ -133,6 +154,17 @@ export class ConsolidatedDefParser extends BaseDefParser {
 			return [];
 		}
 
+		// Treat a leading "**" as bold text at the start of the definition.
+		// Backtrack over both asterisks and treat it as body.
+		// Fixes an issue where bold text at the start of the line
+		// causes the rest of the line to be ignored.
+		const nextChar = this.consumeChar();
+		if (nextChar == "*") {
+			this.spitChar(2);
+			return [];
+		}
+		this.spitChar();
+
 		// Consume until reach ASTERISK
 		let aliasStart = this.cursor;
 		let aliasEnd = aliasStart;
@@ -158,26 +190,44 @@ export class ConsolidatedDefParser extends BaseDefParser {
 		return aliases.map((alias) => alias.trim());
 	}
 
-	private parseDef(): string {
+	private parseDef(): { def: string; notes: string } {
 		let defStr = "";
 
 		while (true) {
 			let c = this.consumeChar();
 			if (c === EOF) {
 				// On EOF, treat all preceding chars as definition
-				return defStr;
+				return this.splitNotes(defStr);
 			}
 			defStr += c;
-			if (defStr.length >= 5) {
-				if (this.checkDelimiter(defStr.slice(defStr.length - 5))) {
-					return defStr.slice(0, defStr.length - 5);
-				}
+			if (
+				defStr.length >= 5 &&
+				this.checkDelimiter(defStr.slice(defStr.length - 5))
+			) {
+				return this.splitNotes(defStr.slice(0, defStr.length - 5));
 			}
 		}
 	}
 
+	// If a line contains only the NOTE_DELIMITER, everything after that line is
+	// the user's personal notes and is excluded from the definition body.
+	private splitNotes(raw: string): { def: string; notes: string } {
+		const lines = raw.split("\n");
+		const endIdx = lines.findIndex(
+			(line) => line.trim() === NOTE_DELIMITER,
+		);
+		if (endIdx < 0) {
+			return { def: raw, notes: "" };
+		}
+		return {
+			def: lines.slice(0, endIdx).join("\n"),
+			notes: lines.slice(endIdx + 1).join("\n"),
+		};
+	}
+
 	private checkDelimiter(d: string) {
-		return d === "\n---\n" || d === "\n___\n";
+		const r = /\n *((---)|(___)) *\n/;
+		return r.test(d);
 	}
 
 	// For backtracking, used for optional grammars rules
@@ -201,14 +251,19 @@ export class ConsolidatedDefParser extends BaseDefParser {
 		return c;
 	}
 
+	private headerToKey(key: string): string {
+		return this.parseSettings.enableCaseSensitive ? key : key.toLowerCase();
+	}
+
 	private defBlockToDefinition(blk: DefblockAST): Definition {
 		return {
-			key: blk.header.toLowerCase(),
+			key: this.headerToKey(blk.header),
 			word: blk.header,
 			aliases: blk.aliases.concat(
 				this.calculatePlurals([blk.header].concat(blk.aliases)),
 			),
 			definition: blk.body.trim(),
+			notes: blk.notes.trim(),
 			file: this.file,
 			linkText: `${this.file.path}${blk.header ? "#" + blk.header : ""}`,
 			fileType: DefFileType.Consolidated,

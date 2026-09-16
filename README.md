@@ -28,6 +28,7 @@ You may want to assign hotkeys to the commands available for easy access:
 - Register consolidated definition file
 - Register atomic definition file
 - Refresh definitions
+- List duplicate definitions (see [Duplicate definitions](#duplicate-definitions))
 
 ## How it works
 
@@ -57,6 +58,7 @@ A `consolidated` definition file is parsed according to the following rules:
 3. An **optional** comma-separated line of alias(es) is expected after a phrase. This must be a line surrounded by asterisks, eg. `*alias*`. *This is rendered as italics in Obsidian*.
 4. A line that occurs after a registered **phrase** and is not an alias is deemed to be a definition. Definitions can be multi-line. All subsequent lines are definitions until the definition block divider is encountered. You may write markdown here, which will be formatted similar to Obsidian's markdown formatting.
 5. A line with nothing but three hyphens `---` is used as a divider to separate definition blocks. This is rendered as a delimiting line in Obsidian. (This divider can be configured in the settings to recognise three underscores `___` as well)
+6. A line with nothing but `%%END%%` marks the end of the definition. Any lines after it (up to the divider) are treated as your own personal notes and are not shown as part of the definition. These notes are left untouched when the plugin edits the definition.
 
 Example definition file:
 
@@ -86,6 +88,17 @@ Example definition file:
 > # Markdown support
 > 
 > Markdown is supported so you can do things like including *italics* or **bold** words.
+>
+> ---
+>
+> # Word with personal notes
+>
+> This is the definition that gets shown in the popover.
+>
+> %%END%%
+>
+> These are my private notes about this entry. They stay in the file but are
+> never shown as part of the definition.
 
 For a more formal definition of the grammar of the consolidated definition file, you may refer to [this document](docs/grammar.md). 
 
@@ -147,9 +160,44 @@ You can edit your properties directly, although for convenience, it is recommend
 To remove contexts, simply remove the file path from the `def-context` property.
 Or if you want to remove all contexts, you can delete the `def-context` property altogether.
 
+## Global definition file discovery
+
+By default, only files within your definition folder are treated as definition files.
+If you'd rather keep definitions alongside your regular notes instead of confining them to one folder, you can opt into discovering definition files by tag instead.
+
+### Usage
+
+1. In the plugin settings, enable `Enable tag-based definition file discovery`.
+2. Set the `Definition file tag` to the tag you want to use. This defaults to `def`.
+3. Add that tag to the `tags` frontmatter (property) of any note you want to be treated as a definition file, eg.
+```
+---
+tags:
+  - definition
+---
+```
+Obsidian provides a nice UI to manage the `tags` frontmatter.
+4. The note is now parsed for definitions like any other definition file (following the same [definition rules](#definition-rules) above), regardless of which folder it lives in.
+
+Note that only the `tags` frontmatter property is checked — inline `#tags` written in the body of a note are not considered.
+
+Tag-based discovery works alongside folder-based discovery rather than replacing it: a file is treated as a definition file if it's in your definition folder **or** carries the configured tag.
+
+*Note: You may suffer from performance issues if your vault is large, as this feature requires the plugin to examine all files in your vault. If you suffer from performance degradation, turn this feature off.*
+
 ## Refreshing definitions
 
 Whenever you find that the plugin is not detecting certain definitions or definition files, run the `Refresh definitions` command to manually get the plugin to read your definition files.
+
+## Duplicate definitions
+
+When more than one definition resolves to the same lookup key, only one of them will win when a phrase is matched in your notes, and the others are silently shadowed. This can happen in a few ways:
+
+- The same phrase (or alias) is defined in two different files or def-blocks.
+- A term is used as the main phrase of one definition and as an alias of another.
+- Two terms differ only in case (e.g. `API` and `api`) while case-sensitivity is disabled.
+
+After definitions are loaded or refreshed, a notice is shown if any conflicts are detected. Run the `List duplicate definitions` command to see each conflicting term along with clickable links to every location it is defined. Whether case-variant terms count as a conflict follows the `Enable Case Sensitivity` setting.
 
 ## Feedback
 

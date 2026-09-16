@@ -1,5 +1,7 @@
 import { Editor } from "obsidian";
 import { getMarkedPhrases } from "src/editor/decoration";
+import { getSettings } from "src/settings";
+
 
 export function getMarkedWordUnderCursor(editor: Editor) {
 	const currWord = getWordByOffset(editor.posToOffset(editor.getCursor()));
@@ -7,7 +9,10 @@ export function getMarkedWordUnderCursor(editor: Editor) {
 }
 
 export function normaliseWord(word: string) {
-	return word.trimStart().trimEnd().toLowerCase();
+	if (getSettings().defFileParseConfig.enableCaseSensitive)
+		return word.trimStart().trimEnd();
+	else
+		return word.trimStart().trimEnd().toLowerCase();
 }
 
 function getWordByOffset(offset: number): string {

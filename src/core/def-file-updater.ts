@@ -2,10 +2,11 @@ import { App, Notice } from "obsidian";
 import { getSettings } from "src/settings";
 import { logError, logWarn } from "src/util/log";
 import { getDefFileManager } from "./def-file-manager";
+import { NOTE_DELIMITER } from "./consolidated-def-parser";
 import { FileParser } from "./file-parser";
 import { DefFileType } from "./file-type";
 import { FrontmatterBuilder } from "./fm-builder";
-import { Definition, FilePosition } from "./model";
+import { Definition } from "./model";
 
 export class DefFileUpdater {
 	app: App;
@@ -15,6 +16,10 @@ export class DefFileUpdater {
 	}
 
 	async updateDefinition(def: Definition) {
+		// Ensure that key is case-insensitive
+		def.key = def.key.toLowerCase();
+		def.definition = def.definition.trim();
+
 		if (def.fileType === DefFileType.Atomic) {
 			await this.updateAtomicDefFile(def);
 		} else if (def.fileType === DefFileType.Consolidated) {
@@ -27,7 +32,31 @@ export class DefFileUpdater {
 	}
 
 	private async updateAtomicDefFile(def: Definition) {
-		await this.app.vault.modify(def.file, def.definition);
+		const file = def.file;
+		const fileContent = await this.app.vault.read(file);
+
+		// account for frontmatter, leaving the rest of it unmodified
+		const fileMetadata = this.app.metadataCache.getFileCache(file);
+		const fmPos = fileMetadata?.frontmatterPosition;
+		let fmContent = "";
+		if (fmPos) {
+			fmContent = fileContent.slice(0, fmPos.end.offset + 1);
+		}
+
+		await this.app.vault.modify(file, fmContent + def.definition);
+
+		// Aliases for atomic definitions live in the frontmatter, so keep them in sync
+		await this.app.fileManager
+			.processFrontMatter(file, (fm) => {
+				if (def.aliases.length > 0) {
+					fm["aliases"] = def.aliases;
+				} else {
+					delete fm["aliases"];
+				}
+			})
+			.catch((e) => {
+				logError(`Error updating aliases frontmatter: ${e}`);
+			});
 	}
 
 	private async updateConsolidatedDefFile(def: Definition) {
@@ -36,40 +65,43 @@ export class DefFileUpdater {
 
 		const fileParser = new FileParser(this.app, file);
 		const defs = await fileParser.parseFile(fileContent);
-		const lines = fileContent.split(/\r?\n/);
 
 		const fileDef = defs.find((fileDef) => fileDef.key === def.key);
 		if (!fileDef) {
 			logError("File definition not found, cannot edit");
 			return;
 		}
-		if (fileDef.position) {
-			// account for frontmatter
-			const fileMetadata = this.app.metadataCache.getFileCache(file);
-			const fmPos = fileMetadata?.frontmatterPosition;
-			if (fmPos) {
-				fileDef.position.to += fmPos.end.line + 1;
-				fileDef.position.from += fmPos.end.line + 1;
-			}
-
-			const newLines = this.replaceDefinition(
-				fileDef.position,
-				def,
-				lines,
-			);
-			const newContent = newLines.join("\n");
-
-			await this.app.vault.modify(file, newContent);
+		if (!fileDef.position) {
+			logError("Position not set, cannot edit");
+			return;
 		}
+
+		// Replace definition and aliases
+		fileDef.definition = def.definition;
+		fileDef.aliases = def.aliases;
+
+		// account for frontmatter
+		const fileMetadata = this.app.metadataCache.getFileCache(file);
+		const fmPos = fileMetadata?.frontmatterPosition;
+		let fmContent: string = "";
+		if (fmPos) {
+			fmContent = fileContent.slice(0, fmPos.end.offset + 1);
+		}
+
+		const newContent = this.generateConsDefFile(defs);
+
+		await this.app.vault.modify(file, fmContent + newContent);
 	}
 
 	async addDefinition(def: Partial<Definition>, folder?: string) {
+		def.word = def.word?.trim();
+		def.definition = def.definition?.trim();
 		if (!def.fileType) {
 			logError("File type missing");
 			return;
 		}
 		if (def.fileType === DefFileType.Consolidated) {
-			await this.addConsoldiatedFileDefinition(def);
+			await this.addConsolidatedFileDefinition(def);
 		} else if (def.fileType === DefFileType.Atomic) {
 			await this.addAtomicFileDefinition(def, folder);
 		}
@@ -108,76 +140,37 @@ export class DefFileUpdater {
 		getDefFileManager().markDirty(file);
 	}
 
-	private async addConsoldiatedFileDefinition(def: Partial<Definition>) {
+	private async addConsolidatedFileDefinition(def: Partial<Definition>) {
 		const file = def.file;
 		if (!file) {
 			logError("Add definition failed, no file given");
 			return;
 		}
 		const fileContent = await this.app.vault.read(file);
-		let lines = fileContent.split(/\r?\n/);
-		lines = this.removeTrailingBlankNewlines(lines);
-		if (!this.checkEndedWithSeparator(lines)) {
-			this.addSeparator(lines);
-		}
-		const addedLines = this.constructLinesFromDef(def);
-		const newLines = lines.concat(addedLines);
-		const newContent = newLines.join("\n");
+		const fileParser = new FileParser(this.app, file);
+		const defs = await fileParser.parseFile(fileContent);
 
-		await this.app.vault.modify(file, newContent);
+		// @ts-ignore: This is fine as long as word, alias (optional) and definition are present
+		// Nothing else is used
+		defs.push(def);
+
+		// account for frontmatter
+		const fileMetadata = this.app.metadataCache.getFileCache(file);
+		const fmPos = fileMetadata?.frontmatterPosition;
+		let fmContent: string = "";
+		if (fmPos) {
+			fmContent = fileContent.slice(0, fmPos.end.offset + 1);
+		}
+
+		const newContent = this.generateConsDefFile(defs);
+
+		await this.app.vault.modify(file, fmContent + newContent);
 	}
 
 	private addSeparator(lines: string[]) {
 		const dividerSettings = getSettings().defFileParseConfig.divider;
 		let sepChoice = dividerSettings.underscore ? "___" : "---";
-		lines.push("", sepChoice);
-	}
-
-	private checkEndedWithSeparator(lines: string[]): boolean {
-		const settings = getSettings();
-		if (
-			settings.defFileParseConfig.divider.dash &&
-			lines[lines.length - 1].startsWith("---")
-		) {
-			return true;
-		}
-		if (
-			settings.defFileParseConfig.divider.underscore &&
-			lines[lines.length - 1].startsWith("___")
-		) {
-			return true;
-		}
-		return false;
-	}
-
-	private removeTrailingBlankNewlines(lines: string[]): string[] {
-		let blankLines = 0;
-		for (let i = 0; i < lines.length; i++) {
-			const currLine = lines[lines.length - 1 - i];
-			if (/\S/.test(currLine)) {
-				blankLines = i;
-				break;
-			}
-		}
-		return lines.slice(0, lines.length - blankLines);
-	}
-
-	private replaceDefinition(
-		position: FilePosition,
-		def: Definition,
-		lines: string[],
-	) {
-		const before = lines.slice(0, position.from);
-		const after = lines.slice(position.to);
-		const newLines = this.constructLinesFromDef(def);
-		return before.concat(
-			newLines,
-			this.isSeparator(lines[position.to]) ? after : [],
-		);
-	}
-
-	private isSeparator(line: string): boolean {
-		return line === "---" || line === "___";
+		lines.push("", sepChoice, "");
 	}
 
 	private constructLinesFromDef(def: Partial<Definition>): string[] {
@@ -189,7 +182,25 @@ export class DefFileUpdater {
 		const trimmedDef = def.definition
 			? def.definition.replace(/\s+$/g, "")
 			: "";
-		lines.push("", trimmedDef, "");
+		lines.push("", trimmedDef);
+		const trimmedNotes = def.notes ? def.notes.replace(/\s+$/g, "") : "";
+		if (trimmedNotes) {
+			lines.push("", NOTE_DELIMITER, "", trimmedNotes);
+		}
 		return lines;
+	}
+
+	// Given an array of definitions, generate the contents of a consolidated definition file
+	// Remember that this does not consider the frontmatter of a file
+	private generateConsDefFile(defs: Definition[]): string {
+		const lines: string[] = [];
+		defs.forEach((def, idx) => {
+			const defLines = this.constructLinesFromDef(def);
+			lines.push(...defLines);
+			if (idx !== defs.length - 1) {
+				this.addSeparator(lines);
+			}
+		});
+		return lines.join("\n");
 	}
 }

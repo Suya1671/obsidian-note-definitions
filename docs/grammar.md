@@ -1,21 +1,28 @@
 # Definition File Grammar
 
-The definition files are designed to be valid markdown files, hence the grammar is a simple subset of a markdown file. 
-This documentation here is written partly for fun and academic practice, and also for those who are interested in how the parser is written, should you want to understand it better, whether to contribute or otherwise. I welcome comments on any mistakes I make and how the grammar could be improved.
+This file documents the formal grammar defined for the definition files. It should give you some insight into how your definition files are parsed, if the README documentation is insufficient.
+If you notice that the behaviour of the parser departs from the documented grammar here, do let me know by raising an issue.
 
-The consolidated file parser is written as a LL parser, with some backtracking in order to support optional syntax. The following is written in extended Backus-Naur form:
+The following is written in extended Backus-Naur form.
+
+## Consolidated definition file grammar
 
 ```text
-DOC = { DEFBLOCK };
-DEFBLOCK = HEADER, [ ALIASES ], DEF, (DELIMITER | EOF);
-HEADER = { NEWLINE } , HASH, SPACE, { CHAR }, NEWLINE;
-ALIASES = { NEWLINE }, ASTERISK, { [{ CHAR, COMMA }], CHAR }, ASTERISK, NEWLINE;
-DEF = { CHAR };
-CHAR = any char;
-DELIMITER = NEWLINE, DASH, DASH, DASH, NEWLINE;
-
-HASH = "#"
-ASTERISK = "*"
-NEWLINE = "\n"
-DASH = "-"
+doc = { def-block, [ delimiter, { "\n" }] }, eof;
+def-block = header, "\n", [ alias, { char }, "\n" ], def, [ note-marker, notes ];
+header = "#", " ", { char };
+alias = { "\n" }, "*", [{ { char }, "," }], { char }, "*";
+def = { char };
+note-marker = "\n", { " " }, "%%END%%", { " " }, "\n";
+notes = { char };
+char = any char;
+delimiter = "\n", { " " }, "-", "-", "-", { " " }, "\n";
 ```
+
+The only terminal is an end-of-file after all def-blocks. If a delimeter is given, then another def-block is expected.
+So a valid file should not provide a trailing delimiter at the end of the file.
+
+If a line within a def-block contains only `%%END%%`, then the definition ends at
+that line. The remaining lines of the def-block (up to the delimiter or end of
+file) are treated as the user's personal notes and are not part of the
+definition. These notes are preserved when the plugin edits the definition.

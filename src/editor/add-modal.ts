@@ -30,7 +30,7 @@ export class AddDefinitionModal {
 		this.modal = new Modal(app);
 	}
 
-	open(text?: string) {
+	async open(text?: string) {
 		// initialize the view when the modal is opened to ensure it's up to date
 		this.activeFile = this.app.workspace.getActiveFile();
 
@@ -73,6 +73,20 @@ export class AddDefinitionModal {
 		// create definition file picker
 		const defManager = getDefFileManager();
 
+		// Get the most updated def files and folders on modal open
+		let [defFolders, defFiles] = defManager.getDefFilesAndFolders();
+
+		if (defFolders.length === 0) {
+			await this.app.vault.createFolder(defManager.getGlobalDefFolder());
+			await this.app.vault.create(
+				`${defManager.getGlobalDefFolder()}/definitions.md`,
+				"",
+			);
+			const f = defManager.getDefFilesAndFolders();
+			defFolders = f[0];
+			defFiles = f[1];
+		}
+
 		// get the currently opened file's first folder and first file, if they exist
 		let default_def_file = "";
 		let default_def_folder = "";
@@ -111,7 +125,6 @@ export class AddDefinitionModal {
 		this.defFilePickerSetting = new Setting(this.modal.contentEl)
 			.setName("Definition file")
 			.addDropdown((component) => {
-				const defFiles = defManager.getConsolidatedDefFiles();
 				defFiles.forEach((file) => {
 					component.addOption(file.path, file.path);
 				});
@@ -130,7 +143,6 @@ export class AddDefinitionModal {
 		this.atomicFolderPickerSetting = new Setting(this.modal.contentEl)
 			.setName("Add file to folder")
 			.addDropdown((component) => {
-				const defFolders = defManager.getDefFolders();
 				defFolders.forEach((folder) => {
 					component.addOption(folder.path, folder.path + "/");
 				});

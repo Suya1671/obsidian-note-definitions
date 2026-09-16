@@ -31,6 +31,7 @@ import { initDefinitionModal } from "./editor/mobile/definition-modal";
 import { FMSuggestModal } from "./editor/frontmatter-suggest-modal";
 import { registerDefFile } from "./editor/def-file-registration";
 import { DefFileType } from "./core/file-type";
+import { DuplicateDefinitionModal } from "./editor/duplicate-modal";
 
 export default class NoteDefinition extends Plugin {
 	activeEditorExtensions: Extension[] = [];
@@ -138,7 +139,21 @@ export default class NoteDefinition extends Plugin {
 			name: "Refresh definitions",
 			callback: () => {
 				this.fileExplorerDeco.run();
-				this.defManager.loadDefinitions();
+				this.defManager
+					.loadDefinitions()
+					.then(
+						this.defManager.triggerDuplicateDefWarning.bind(
+							this.defManager,
+						),
+					);
+			},
+		});
+
+		this.addCommand({
+			id: "list-duplicate-definitions",
+			name: "List duplicate definitions",
+			callback: () => {
+				new DuplicateDefinitionModal(this.app).open();
 			},
 		});
 
@@ -259,6 +274,17 @@ export default class NoteDefinition extends Plugin {
 						if (plugin) {
 							plugin.forceUpdate();
 						}
+					}
+				}
+
+				if (getSettings().enableTagDefFileDiscovery) {
+					const isDef = this.defManager.isDefFile(file);
+					const wasDef = this.defManager.globalDefFiles.has(
+						file.path,
+					);
+					if (isDef !== wasDef) {
+						this.fileExplorerDeco.run();
+						this.refreshDefinitions();
 					}
 				}
 			}),
